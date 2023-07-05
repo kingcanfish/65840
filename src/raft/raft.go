@@ -169,6 +169,7 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
+	From        int
 	Term        int  // 自己的任期
 	VoteGranted bool // 是否同意投票给候选者
 }
@@ -191,9 +192,9 @@ type AppendEntriesReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	Debug(dVote, "S%d received vote req %+v", rf.me, args)
 	defer rf.mu.Unlock()
 	currentTerm := rf.currentTerm
-	voteFor := rf.voteFor
 
 	if args.Term < currentTerm {
 		reply.VoteGranted = false
@@ -202,19 +203,28 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// 如果一个节点发现自己的 currentTerm 小于其他节点的，要立即更新自己的
 	if args.Term > currentTerm {
-
-		rf.currentTerm = args.Term
+		rf.beFollowerLocked(args.Term)
 	}
 
-	if (voteFor == -1 || voteFor == args.CandidateID) && rf.receiveLogIsUptoDate(args.LastLogIndex, args.LastLogTerm) {
+	if (rf.voteFor == -1 || rf.voteFor == args.CandidateID) && rf.receiveLogIsUptoDate(args.LastLogIndex, args.LastLogTerm) {
 		reply.VoteGranted = true
+		rf.voteFor = args.CandidateID
 	} else {
 		reply.VoteGranted = false
 	}
 
 	reply.Term = rf.currentTerm
+	reply.From = rf.me
 
 	return
+}
+
+func (rf *Raft) beFollowerLocked(serveTerm int) {
+	rf.currentTerm = serveTerm
+	rf.status = StatusFollower
+	rf.voteFor = -1
+	rf.lastHeartBeatStamp = time.Now()
+	Debug(dFollower, "S%d be follower term:%d", rf.me, serveTerm)
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -346,6 +356,7 @@ func (rf *Raft) ticker() {
 
 			// 选举超时
 			if time.Now().After(rf.lastHeartBeatStamp.Add(timeOut)) {
+				Debug(dTimer, "S%d follower timer out", rf.me)
 				rf.beCandidateLocked()
 			}
 		}
@@ -364,6 +375,8 @@ func (rf *Raft) beCandidateLocked() {
 	rf.status = StatusCandidate
 	rf.lastHeartBeatStamp = time.Now()
 	serveTerm := rf.currentTerm
+
+	Debug(dTerm, "S%d be Candidate for Term %d", rf.me, serveTerm)
 
 	go rf.candidateLoop(serveTerm)
 
@@ -410,7 +423,7 @@ func (rf *Raft) leaderLoop(serveTerm int) {
 		rf.doSendAppendEntriesLocked()
 
 		rf.mu.Unlock()
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(80 * time.Millisecond)
 	}
 }
 
@@ -440,6 +453,7 @@ func (rf *Raft) doSendAppendEntriesLocked() {
 }
 
 func (rf *Raft) doSendVoteRequestLocked(respChan chan *RequestVoteReply) {
+	rf.voteFor = rf.me
 	term, idx := rf.lastLogInfo()
 	args := &RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -462,13 +476,14 @@ func (rf *Raft) doSendVoteRequestLocked(respChan chan *RequestVoteReply) {
 }
 
 func (rf *Raft) RandomElectionTimeout() time.Duration {
-	return (time.Duration(150 + (rand.Int63() % 150))) * time.Millisecond
+	return (time.Duration(150 + (rand.Int63() % 300))) * time.Millisecond
 }
 
 // beLeaderLocked Need Locked改变节点状态为leader 调用前应该上锁
 func (rf *Raft) beLeaderLocked() {
 	rf.lastHeartBeatStamp = time.Now()
 	rf.status = StatusLeader
+	Debug(dLeader, "S%d be Leader for term %d", rf.me, rf.currentTerm)
 	go rf.leaderLoop(rf.currentTerm)
 }
 
@@ -480,6 +495,7 @@ func (rf *Raft) processVoteReply(ctx context.Context, serveTerm int, respChan ch
 		case <-ctx.Done():
 			return
 		case reply := <-respChan:
+			Debug(dVote, "S%d <- S%d vote reply %+v", rf.me, reply.From, reply)
 			if reply.VoteGranted == true {
 				voteGranted++
 			}
