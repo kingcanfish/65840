@@ -410,7 +410,7 @@ func (rf *Raft) leaderLoop(serveTerm int) {
 		rf.doSendAppendEntriesLocked()
 
 		rf.mu.Unlock()
-		time.Sleep(80 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
